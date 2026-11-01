@@ -1,0 +1,52 @@
+name: Build Windows VST3
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - name: Check out NDS Veil source
+        uses: actions/checkout@v4
+        with:
+          path: nds-veil-vst
+
+      - name: Check out JUCE 8.0.15
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          ref: 8.0.15
+          path: tools/JUCE
+
+      - name: Configure (Visual Studio 2022, x64)
+        shell: pwsh
+        run: |
+          cmake -S nds-veil-vst -B build -G "Visual Studio 17 2022" -A x64 `
+            -DJUCE_DIR="$env:GITHUB_WORKSPACE\tools\JUCE"
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build build --config Release
+
+      - name: List built files
+        shell: pwsh
+        run: Get-ChildItem -Recurse build\NDSVeil_artefacts\Release | Select-Object FullName
+
+      - name: Collect artefacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          if (-not (Test-Path "build\NDSVeil_artefacts\Release\VST3\NDS Veil.vst3")) { throw "NDS Veil.vst3 not found — build did not produce the VST3" }
+          Copy-Item -Recurse "build\NDSVeil_artefacts\Release\VST3\NDS Veil.vst3" "dist\" -ErrorAction Stop
+          Get-ChildItem -Recurse dist | Select-Object FullName
+
+      - name: Upload Windows VST3
+        uses: actions/upload-artifact@v4
+        with:
+          name: NDSVeil-Windows-VST3
+          path: dist
+          if-no-files-found: error
