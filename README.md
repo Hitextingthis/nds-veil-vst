@@ -1,4 +1,4 @@
-# NDS Veil v0.1 — preset psychoacoustic enhancer for mastering
+# NDS Veil v0.2 — preset psychoacoustic enhancer for mastering
 
 A clean-room, preset-based psychoacoustic enhancer, built for
 mastering. Original DSP and original UI (NDS Field System v1).
@@ -10,16 +10,53 @@ no copied artwork, branding, presets, or names were used.
 
 Company: NDS · Plugin code: NDVe · Product name: NDS Veil
 
-## Signal chain (per channel, parallel)
+## v0.2 — what changed, and why
+
+v0.1's FL verdict was: "it's just some white noise that
+blends in." That was accurate: v0.1's carrier was shaped
+white noise, envelope-modulated only, so its waveform never
+followed the music. v0.2 changes the carrier:
+
+- **Carrier: Source (default) / Noise.** Source is a quiet,
+  decorrelated copy of your own audio: full dry signal →
+  channel-specific allpass + 0.3 ms right-channel delay →
+  peaking filter at the Focus frequency → veil gain. It
+  sounds like texture and width, not hiss, because its
+  spectrum and timing follow the source. Harness: source
+  veil correlates 0.99 with dry, noise veil 0.01–0.02.
+- **Noise carrier, improved:** still available, but now split
+  into 3 bands (low <500 Hz, mid 500–4000 Hz, high >4000 Hz),
+  each scaled by that band's own envelope follower, and the
+  silence floor is lowered from 0.25 to 0.05, so it no longer
+  hisses in gaps. Silence veil RMS: −94 dB (was −70 dB).
+- **Focus, redefined by carrier:** for Source, Focus is a
+  peaking frequency (500–12000 Hz log, +0–6 dB) — it
+  emphasises a region, it does not exclude the rest (v0.2
+  first tried band-weighting the source veil and dropped it:
+  on a bass-forward mix it cut the veil to −68.7 dB because
+  the low band got weight 0 at Vocal Focus; full-band source
+  measures −59.9 dB, close to v0.1's −58.3 dB). For Noise,
+  Focus is a triangular band blend.
+- **Everything else from v0.1 is unchanged:** presets,
+  mastering chain position (before the final limiter),
+  level-matched bypass, Mono/Delta monitors, ceiling/target
+  as meter references only, peak/RMS editor meters.
+- **Preset buttons now set Carrier to Source.** A v0.1 FL
+  session loading into v0.2 keeps its Veil/Focus/Width/Mix
+  values (same parameter IDs) and gains the new Carrier
+  parameter at its default, Source.
+
+## Signal chain (per channel, parallel) — v0.2
 
 ```
 IN (dry, untouched)
-  ├─ envelope follower (|dry|, 5 ms attack / 100 ms release)
-  └─ veil: white noise (xorshift, own + shared for width)
-           → HP 150 Hz → peaking at Focus freq → LP 18 kHz
-           → envelope modulation (0.25 + 0.75 * env, capped)
-           → veil gain (dB) × rate compensation sqrt(rate/48k)
-           → Mix
+  ├─ SOURCE veil (default): dry → allpass (per-channel coeff)
+  │    → 0.3 ms delay (right only, scaled by Width)
+  │    → peaking at Focus freq → veil gain → Mix
+  └─ NOISE veil (option): white noise (xorshift, own + shared)
+       → 3-band split → per-band envelope followers
+       → band blend by Focus → veil gain × sqrt(rate/48k)
+       → Mix
 OUT = (dry + veil) × Trim, then Monitor (LR / Mono / Delta)
 ```
 
@@ -51,8 +88,9 @@ OUT = (dry + veil) × Trim, then Monitor (LR / Mono / Delta)
 
 | Parameter | Range | Default |
 |---|---|---|
+| Carrier | Noise / Source | Source |
 | Veil Level | −60 to −40 dB | −50 dB (Vocal Focus) |
-| Focus | 0–1 (500–12000 Hz log, peaking +0–6 dB) | 0.60 |
+| Focus | 0–1 (Source: 500–12000 Hz log peaking; Noise: band blend) | 0.60 |
 | Width | 0–1 | 0.40 |
 | Mix | 0–100% | 100% |
 | Output Trim | −6 to +6 dB | 0 dB |
@@ -97,12 +135,13 @@ Session recall therefore restores those values. Presets:
 ## Verification (local Linux proof only — see below)
 
 * Harness (`tools/harness/harness.cpp`, no JUCE, links only
-  `Source/VeilDSP.h`): **ALL PASS at 48 kHz and 96 kHz** —
-  Mix 0 = veil 0, wet−dry = veil exactly, silence veil RMS
-  −70.0 dB @48k / −69.8 dB @96k (below −60 dB), Forward RMS >
-  Quiet Room RMS, Air high/mid ratio > Vocal high/mid ratio
-  and Vocal mid/high ratio > Air mid/high ratio, hot signal
-  finite with peak 1.41. Full log: `HARNESS-REPORT.md`.
+  `Source/VeilDSP.h`): **v0.2 ALL PASS at 48 kHz and 96 kHz** —
+  Mix 0 = veil 0, Source silence exactly 0, Noise silence
+  −94.2 dB @48k / −92.8 dB @96k, Forward > Quiet (both
+  carriers), Source correlation 0.99 vs Noise 0.01–0.02,
+  Source linearity ratio 2.00, hot signal finite peak
+  1.37–1.38, Noise rate stability 0.66 dB. Full log:
+  `HARNESS-REPORT.md` (v0.1 results preserved there too).
 * Linux VST3 + Standalone build: see build log in delivery.
 * pluginval strictness 5, in-process, under Xvfb: see
   `pluginval-log.txt` in delivery.

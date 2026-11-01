@@ -1,22 +1,53 @@
-// NDS Veil — original psychoacoustic veil DSP, pure C++ (no JUCE).
-// Concept, in general terms only: a very low-level, spectrally
-// shaped, source-correlated noise veil added in parallel to an
-// untouched dry signal. This is NOT FiDef's proprietary signal,
-// code, or curves: the noise source, shaping filters, envelope
-// follower, and preset values below are original, textbook designs.
-// The dry path is never EQ'd, compressed, or limited here.
+// NDS Veil v0.2 — original psychoacoustic veil DSP, pure C++ (no JUCE).
 //
-// Chain per channel:
-//   noise (xorshift white) -> HP 150 Hz -> peaking filter at the
-//   Focus frequency -> LP 18 kHz -> envelope modulation ->
-//   veil gain (dB) -> mix -> added to dry.
-// Stereo width blends a shared (common) noise with each channel's
-// own noise: width 0 = fully common, width 1 = fully independent.
+// v0.1 lesson, from the user's FL test: the veil was shaped white
+// noise, envelope-modulated only, so in Delta it sounded like
+// white noise that blends in. v0.2 fixes the carrier, not the
+// level: the default carrier is now the SOURCE itself, and the
+// noise carrier is kept as an option with a much lower silence
+// floor and per-band envelopes.
+//
+// Carriers (both parallel, dry untouched):
+//   SOURCE (default): the FULL dry signal (not band-limited,
+//     so a bass-forward mix does not lose its veil when Focus
+//     sits in the mids), passed through a channel-specific
+//     first-order allpass + a small time-based delay on the
+//     right channel for width, then a peaking filter at the
+//     Focus frequency for spectral emphasis, then added at
+//     the veil gain. This is a quiet, decorrelated copy of
+//     the music itself: it sounds like texture and width, not
+//     hiss, because its spectrum and timing follow the source.
+//     It is linear: doubling dry doubles the veil, and
+//     silence gives veil exactly 0. Focus here is a peaking
+//     frequency (500-12000 Hz log, +0-6 dB), as in v0.1 —
+//     it emphasises a region, it does not exclude the rest.
+//   NOISE: xorshift white noise, split into the same 3 bands,
+//     each band scaled by that band's own envelope follower
+//     (5 ms attack / 100 ms release) from the dry signal in
+//     that band, with a silence floor of 0.05 (was 0.25 in v0.1,
+//     which kept hissing in gaps). Focus weights the bands.
+//     Noise veil is rate-compensated by sqrt(rate/48k) because
+//     white noise through fixed-frequency filters loses energy
+//     as sample rate rises; the source carrier needs no such
+//     compensation (its filters are rate-correct and its delay
+//     is time-based).
+//
+// Focus (0..1) does two jobs, by carrier: for SOURCE it is
+// a peaking frequency (500-12000 Hz log); for NOISE it is a
+// triangular band blend (low = max(0, 1-2*focus), mid =
+// 1-|2*focus-1|, high = max(0, 2*focus-1)). At focus 0.5 the
+// noise veil is all mid; at 0.85 it is 70% high, 30% mid.
+// Preset focus values from v0.1 carry over unchanged.
+//
+// This is NOT FiDef's proprietary signal, code, or curves:
+// the band split, allpass decorrelator, envelope followers,
+// and preset values below are original, textbook designs.
 #pragma once
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace ndsveil {
 
@@ -64,8 +95,20 @@ struct Biquad {
     }
 };
 
-// Deterministic xorshift white-noise source (own noise per channel,
-// plus a shared source created by the processor for width blending).
+// First-order allpass, magnitude-flat, phase-shifting. Different
+// coefficients per channel give stereo decorrelation without
+// changing the spectrum.
+struct Allpass {
+    double a = 0.4, x1 = 0.0, y1 = 0.0;
+    explicit Allpass(double coeff) : a(coeff) {}
+    void reset() { x1 = 0.0; y1 = 0.0; }
+    float process(float x) {
+        const double y = -a * x + x1 + a * y1;
+        x1 = x; y1 = y;
+        return static_cast<float>(y);
+    }
+};
+
 struct NoiseSource {
     std::uint32_t state = 0x12345678u;
     explicit NoiseSource(std::uint32_t seed) : state(seed ? seed : 0x12345678u) {}
@@ -73,16 +116,16 @@ struct NoiseSource {
         std::uint32_t x = state;
         x ^= x << 13; x ^= x >> 17; x ^= x << 5;
         state = x;
-        return static_cast<float>(x >> 8) / 8388607.0f - 1.0f; // ~[-1, 1]
+        return static_cast<float>(x >> 8) / 8388607.0f - 1.0f;
     }
 };
 
 struct Preset {
     const char* name;
     const char* job;
-    float veilDb;   // -60..-40
-    float focus;    // 0..1 -> focus freq log 500..12000 Hz
-    float width;    // 0..1
+    float veilDb;
+    float focus;
+    float width;
 };
 
 inline const Preset kPresets[5] = {
@@ -98,72 +141,126 @@ inline double focusFreqHz(float focus) {
     return 500.0 * std::pow(12000.0 / 500.0, f);
 }
 
+// Triangular band weights for a focus value in [0, 1] (noise carrier).
+inline void bandWeights(float focus, float& wLow, float& wMid, float& wHigh) {
+    const float f = std::min(1.0f, std::max(0.0f, focus));
+    wLow = std::max(0.0f, 1.0f - 2.0f * f);
+    wMid = 1.0f - std::abs(2.0f * f - 1.0f);
+    wHigh = std::max(0.0f, 2.0f * f - 1.0f);
+}
+
+enum class Carrier { Noise = 0, Source = 1 };
+
 class VeilChannel {
 public:
-    explicit VeilChannel(std::uint32_t seed) : ownNoise(seed) {}
+    // isRight: right channel gets a small time-based delay and a
+    // different allpass coefficient, for width. Left gets none.
+    VeilChannel(std::uint32_t seed, bool isRight)
+        : ownNoise(seed), allpass(isRight ? -0.4 : 0.4), right(isRight) {}
 
     void prepare(double sampleRate) {
         rate = sampleRate;
-        updateFilters();
-        env = 0.0f;
-        smoothGain = 0.0f;
+        dryLow.setLowPass(500.0, rate);
+        dryMidHp.setHighPass(500.0, rate);
+        dryMidLp.setLowPass(4000.0, rate);
+        dryHigh.setHighPass(4000.0, rate);
+        noiseLow.setLowPass(500.0, rate);
+        noiseMidHp.setHighPass(500.0, rate);
+        noiseMidLp.setLowPass(4000.0, rate);
+        noiseHigh.setHighPass(4000.0, rate);
+        attackCoeff = 1.0 - std::exp(-1.0 / (0.005 * rate));
+        releaseCoeff = 1.0 - std::exp(-1.0 / (0.100 * rate));
+        delaySamples = right ? std::max(1, static_cast<int>(std::lround(0.0003 * rate))) : 0;
+        delay.assign(1024, 0.0f);
+        delayPos = 0;
+        reset();
     }
     void reset() {
-        hp.reset(); peak.reset(); lp.reset(); env = 0.0f;
+        dryLow.reset(); dryMidHp.reset(); dryMidLp.reset(); dryHigh.reset();
+        noiseLow.reset(); noiseMidHp.reset(); noiseMidLp.reset(); noiseHigh.reset();
+        focusPeak.reset();
+        allpass.reset();
+        envLow = envMid = envHigh = 0.0f;
+        smoothGain = 0.0f;
+        std::fill(delay.begin(), delay.end(), 0.0f);
+        delayPos = 0;
     }
-    // focus 0..1, veilDb -60..-40. Rebuilds filters only on change.
-    void update(float focus, float veilDb) {
-        if (focus != lastFocus || veilDb != lastVeilDb || rate <= 0.0) {
-            lastFocus = focus; lastVeilDb = veilDb;
-            updateFilters();
-        }
-    }
+
     // Returns the veil sample for this channel. commonNoise is the
-    // shared noise sample for this frame; width blends it with the
-    // channel's own noise before shaping. mix is 0..1.
-    float process(float dry, float commonNoise, float width, float mix) {
-        // Envelope follower: fast attack, slow release, on |dry|.
-        const float a = std::abs(dry);
-        const double coeff = (a > env) ? attackCoeff : releaseCoeff;
-        env = static_cast<float>(env + coeff * (a - env));
-        const float mod = 0.25f + 0.75f * std::min(1.0f, env * 1.5f);
-        const float blended = (1.0f - width) * commonNoise + width * ownNoise.next();
-        float v = hp.process(blended);
-        v = peak.process(v);
-        v = lp.process(v);
-        // Rate compensation: white noise through a fixed-frequency
-        // low-pass loses energy as sample rate rises (the passband
-        // is a smaller fraction of Nyquist). Scaling by
-        // sqrt(rate/48k) keeps the veil RMS within ~1 dB across
-        // 48/96/192 kHz, verified by the harness. Without it, the
-        // 96 kHz veil measured ~2.8 dB quieter than at 48 kHz.
-        const float target = dbToGain(lastVeilDb) * mod * mix *
-            static_cast<float>(std::sqrt(rate / 48000.0));
-        // 10 ms gain smoothing to avoid clicks on parameter moves.
+    // shared noise sample for this frame (noise carrier only).
+    float process(float dry, float commonNoise, float width, float mix,
+                  Carrier carrier, float focus, float veilDb) {
+        // Band-split dry, and per-band envelopes.
+        const float bandDryLow = dryLow.process(dry);
+        const float bandDryMid = dryMidLp.process(dryMidHp.process(dry));
+        const float bandDryHigh = dryHigh.process(dry);
+        auto follow = [&](float& env, float x) {
+            const double coeff = (std::abs(x) > env) ? attackCoeff : releaseCoeff;
+            env = static_cast<float>(env + coeff * (std::abs(x) - env));
+        };
+        follow(envLow, bandDryLow);
+        follow(envMid, bandDryMid);
+        follow(envHigh, bandDryHigh);
+
+        float wLow = 0, wMid = 0, wHigh = 0;
+        bandWeights(focus, wLow, wMid, wHigh);
+
+        float veil = 0.0f;
+        if (carrier == Carrier::Source) {
+            if (focus != lastFocus) {
+                lastFocus = focus;
+                focusPeak.setPeaking(focusFreqHz(focus), rate,
+                    6.0 * std::min(1.0, std::max(0.0, static_cast<double>(focus))), 0.8);
+            }
+            float decorrelated = allpass.process(dry);
+            // Right-channel time delay (0.3 ms) for width. Left is
+            // undelayed. Width scales the delay amount: at width 0
+            // both channels are identical (mono veil), at width 1
+            // the full delay applies.
+            if (delaySamples > 0 && width > 0.0f) {
+                const int readPos = static_cast<int>((delayPos + delay.size() -
+                    static_cast<size_t>(std::lround(width * delaySamples))) % delay.size());
+                delay[delayPos] = decorrelated;
+                delayPos = (delayPos + 1) % delay.size();
+                decorrelated = delay[readPos];
+            }
+            veil = focusPeak.process(decorrelated);
+        } else {
+            const float blended = (1.0f - width) * commonNoise + width * ownNoise.next();
+            const float bandNoiseLow = noiseLow.process(blended);
+            const float bandNoiseMid = noiseMidLp.process(noiseMidHp.process(blended));
+            const float bandNoiseHigh = noiseHigh.process(blended);
+            // Per-band envelope modulation, silence floor 0.05.
+            const float modLow = 0.05f + 0.95f * std::min(1.0f, envLow * 1.5f);
+            const float modMid = 0.05f + 0.95f * std::min(1.0f, envMid * 1.5f);
+            const float modHigh = 0.05f + 0.95f * std::min(1.0f, envHigh * 1.5f);
+            veil = wLow * bandNoiseLow * modLow + wMid * bandNoiseMid * modMid +
+                   wHigh * bandNoiseHigh * modHigh;
+            // Rate compensation for the noise carrier only.
+            veil *= static_cast<float>(std::sqrt(rate / 48000.0));
+        }
+
+        const float target = dbToGain(veilDb) * mix;
         const double gCoeff = 1.0 - std::exp(-1.0 / (0.010 * rate));
         smoothGain += static_cast<float>(gCoeff * (target - smoothGain));
-        return v * smoothGain;
+        return veil * smoothGain;
     }
 
 private:
-    void updateFilters() {
-        if (rate <= 0.0) return;
-        const double f = focusFreqHz(lastFocus);
-        const double peakGain = 6.0 * std::min(1.0, std::max(0.0, static_cast<double>(lastFocus)));
-        hp.setHighPass(150.0, rate);
-        peak.setPeaking(f, rate, peakGain, 0.8);
-        lp.setLowPass(18000.0, rate);
-        // Filter state is kept across parameter changes (no click
-        // from a reset); only a fresh prepare/reset clears it.
-        attackCoeff = 1.0 - std::exp(-1.0 / (0.005 * rate));
-        releaseCoeff = 1.0 - std::exp(-1.0 / (0.100 * rate));
-    }
     double rate = 48000.0;
-    float lastFocus = 0.6f, lastVeilDb = -50.0f;
-    float env = 0.0f, smoothGain = 0.0f;
     double attackCoeff = 0.01, releaseCoeff = 0.001;
-    Biquad hp, peak, lp;
+    float envLow = 0.0f, envMid = 0.0f, envHigh = 0.0f;
+    float smoothGain = 0.0f;
+    Biquad dryLow, dryMidHp, dryMidLp, dryHigh;
+    Biquad noiseLow, noiseMidHp, noiseMidLp, noiseHigh;
+    Biquad focusPeak;
+    float lastFocus = -1.0f;
+    Allpass allpass;
     NoiseSource ownNoise;
+    bool right = false;
+    std::vector<float> delay;
+    size_t delayPos = 0;
+    int delaySamples = 0;
 };
 
 } // namespace ndsveil

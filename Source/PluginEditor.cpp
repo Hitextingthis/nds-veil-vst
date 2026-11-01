@@ -70,7 +70,7 @@ void FieldView::paint(juce::Graphics& g) {
 
 VeilAudioEditor::VeilAudioEditor(VeilAudioProcessor& p)
     : AudioProcessorEditor(p), processor(p), field(p) {
-    setSize(1020, 600);
+    setSize(1020, 650);
     auto& apvts = processor.apvts;
 
     titleLabel.setText("NDS Veil", juce::dontSendNotification);
@@ -130,6 +130,7 @@ VeilAudioEditor::VeilAudioEditor(VeilAudioProcessor& p)
         for (int i = 0; i < items.size(); ++i) c.addItem(items[i], i + 1);
         comboAtts.push_back(std::make_unique<ComboAtt>(apvts, id, c));
     };
+    choice(carrierCombo, carrierLabel, "CARRIER", "carrier", { "Noise", "Source" });
     choice(monitorCombo, monitorLabel, "MONITOR", "monitor", { "LR", "Mono", "Delta" });
     choice(targetCombo, targetLabel, "TARGET", "target", { "Streaming -14 LUFS", "Loud label -9 LUFS", "Dynamic -16 LUFS", "Custom" });
 
@@ -173,18 +174,18 @@ void VeilAudioEditor::paint(juce::Graphics& g) {
     };
     const float ceiling = processor.apvts.getRawParameterValue("ceilingDb") != nullptr
         ? processor.apvts.getRawParameterValue("ceilingDb")->load() : -1.0f;
-    bar(748, 512, processor.getInPeak(), "IN");
-    bar(748, 532, processor.getOutPeak(), "OUT");
-    bar(748, 552, std::min(1.0f, processor.getVeilPeak() * 40.0f), "VEIL x40");
+    bar(748, 560, processor.getInPeak(), "IN");
+    bar(748, 580, processor.getOutPeak(), "OUT");
+    bar(748, 600, std::min(1.0f, processor.getVeilPeak() * 40.0f), "VEIL x40");
     if (dbOf(processor.getOutPeak()) > ceiling) {
         g.setColour(juce::Colours::red);
         g.setFont(juce::Font(juce::FontOptions(12.0f, juce::Font::bold)));
-        g.drawText("OVER CEILING — check before sending", 748, 562, 260, 16, juce::Justification::left);
+        g.drawText("OVER CEILING — check before sending", 748, 610, 260, 16, juce::Justification::left);
     } else {
         g.setColour(secondary());
         g.setFont(juce::Font(juce::FontOptions(11.0f)));
-        g.drawText("Peak meters only.", 748, 562, 260, 16, juce::Justification::left);
-        g.drawText("Verify LUFS/TP in RX / StreamCheck.", 748, 578, 260, 16, juce::Justification::left);
+        g.drawText("Peak meters only.", 748, 610, 260, 16, juce::Justification::left);
+        g.drawText("Verify LUFS/TP in RX / StreamCheck.", 748, 626, 260, 16, juce::Justification::left);
     }
 }
 
@@ -203,9 +204,10 @@ void VeilAudioEditor::resized() {
     widthSlider.setBounds(728, 190, 88, 88); widthLabel.setBounds(728, 272, 88, 16);
     mixSlider.setBounds(836, 190, 88, 88); mixLabel.setBounds(836, 272, 88, 16);
     trimSlider.setBounds(782, 300, 88, 88); trimLabel.setBounds(782, 382, 88, 16);
-    monitorLabel.setBounds(728, 410, 90, 16); monitorCombo.setBounds(728, 428, 196, 24);
-    targetLabel.setBounds(728, 458, 90, 16); targetCombo.setBounds(728, 476, 196, 24);
-    // Meter bars are drawn in paint() at y 512/532/552, x 748.
+    carrierLabel.setBounds(728, 410, 90, 16); carrierCombo.setBounds(728, 428, 196, 24);
+    monitorLabel.setBounds(728, 458, 90, 16); monitorCombo.setBounds(728, 476, 196, 24);
+    targetLabel.setBounds(728, 506, 90, 16); targetCombo.setBounds(728, 524, 196, 24);
+    // Meter bars are drawn in paint() at y 560/580/600, x 748.
     ceilingLabel.setBounds(16, 540, 110, 16);
     ceilingSlider.setBounds(130, 536, 220, 24);
 }

@@ -37,8 +37,8 @@ private:
     juce::TextButton presetButtons[5];
     int currentPreset = 3; // Vocal Focus default
     juce::ToggleButton onToggle;
-    juce::ComboBox monitorCombo, targetCombo;
-    juce::Label monitorLabel, targetLabel, ceilingLabel;
+    juce::ComboBox monitorCombo, targetCombo, carrierCombo;
+    juce::Label monitorLabel, targetLabel, carrierLabel, ceilingLabel;
     juce::Slider veilSlider, focusSlider, widthSlider, mixSlider, trimSlider, ceilingSlider;
     juce::Label veilLabel, focusLabel, widthLabel, mixLabel, trimLabel;
 

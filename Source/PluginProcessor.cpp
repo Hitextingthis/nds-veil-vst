@@ -26,6 +26,9 @@ VeilAudioProcessor::~VeilAudioProcessor() = default;
 juce::AudioProcessorValueTreeState::ParameterLayout VeilAudioProcessor::createParams() {
     using namespace juce;
     std::vector<std::unique_ptr<RangedAudioParameter>> p;
+    p.push_back(std::make_unique<AudioParameterChoice>(
+        ParameterID{ "carrier", 1 }, "Carrier",
+        StringArray{ "Noise", "Source" }, 1));
     p.push_back(std::make_unique<AudioParameterFloat>(
         ParameterID{ "veilDb", 1 }, "Veil Level",
         NormalisableRange<float>(-60.0f, -40.0f, 0.1f), -50.0f, "dB"));
@@ -62,13 +65,17 @@ void VeilAudioProcessor::applyPreset(int index) {
     setParam(apvts, "focus", pr.focus);
     setParam(apvts, "width", pr.width);
     setParam(apvts, "mix", 100.0f);
+    // v0.2: presets are source-carrier presets. A user who wants
+    // the old noise carrier can switch Carrier back to Noise.
+    auto* carrier = apvts.getParameter("carrier");
+    if (carrier != nullptr) carrier->setValueNotifyingHost(carrier->convertTo0to1(1.0f));
 }
 
 void VeilAudioProcessor::prepareToPlay(double sampleRate, int) {
     currentSampleRate = sampleRate;
     channels.clear();
-    channels.emplace_back(0x12345678u);
-    channels.emplace_back(0x87654321u);
+    channels.emplace_back(0x12345678u, false);
+    channels.emplace_back(0x87654321u, true);
     for (auto& ch : channels) ch.prepare(sampleRate);
 }
 
@@ -94,6 +101,8 @@ void VeilAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
     const int numSamples = buffer.getNumSamples();
 
     const bool on = paramBool(apvts, "on");
+    const ndsveil::Carrier carrier = static_cast<int>(paramFloat(apvts, "carrier")) == 1
+        ? ndsveil::Carrier::Source : ndsveil::Carrier::Noise;
     const float mix = paramFloat(apvts, "mix") / 100.0f;
     const float veilDb = paramFloat(apvts, "veilDb");
     const float focus = paramFloat(apvts, "focus");
@@ -116,8 +125,6 @@ void VeilAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
         inRms.store(std::sqrt(sumSq / std::max(1, numSamples * numCh)));
         return;
     }
-
-    for (auto& ch : channels) ch.update(focus, veilDb);
 
     std::vector<float> dryL(numSamples, 0.0f), dryR(numSamples, 0.0f);
     std::vector<float> veilL(numSamples, 0.0f), veilR(numSamples, 0.0f);
@@ -144,7 +151,7 @@ void VeilAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
         const float* input = inBus.getReadPointer(ch);
         auto& veil = (ch == 0 ? veilL : veilR);
         for (int i = 0; i < numSamples; ++i) {
-            veil[i] = channels[ch].process(input[i], common[i], width, mix);
+            veil[i] = channels[ch].process(input[i], common[i], width, mix, carrier, focus, veilDb);
             veilPeakVal = std::max(veilPeakVal, std::abs(veil[i]));
         }
     }
